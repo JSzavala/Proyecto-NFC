@@ -1,73 +1,37 @@
-#include <string.h>
+#include <stdlib.h>
+#include <time.h>
 
+#include "discord_bot.h"
+#include "esp_coexist.h"
+#include "esp_event.h"
+#include "esp_log.h"
+#include "esp_netif.h"
+#include "esp_netif_sntp.h"
+#include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "esp_system.h"
-#include "esp_log.h"
-#include "esp_event.h"
+#include "lab_store.h"
 #include "nvs_flash.h"
 #include "protocol_examples_common.h"
+#include "thingspeak.h"
+#include "zigbee_gateway.h"
 
-#include "discord.h"
-#include "discord/session.h"
-#include "discord/message.h"
+static const char *TAG = "lab_gateway";
 
-static const char *TAG = "Paputronico";
-
-static discord_handle_t bot;
-
-static void bot_event_handler(void *handler_arg, esp_event_base_t base, int32_t event_id, void *event_data)
+static void time_sync_start(void)
 {
-    discord_event_data_t *data = (discord_event_data_t *)event_data;
+    setenv("TZ", CONFIG_LAB_TIMEZONE, 1);
+    tzset();
 
-    switch (event_id) {
-        case DISCORD_EVENT_CONNECTED: {
-            discord_session_t *session = (discord_session_t *)data->ptr;
+    esp_sntp_config_t config = ESP_NETIF_SNTP_DEFAULT_CONFIG(CONFIG_LAB_SNTP_SERVER);
+    config.wait_for_sync = false;
+    config.start = true;
 
-            ESP_LOGI(TAG, "Bot %s#%s connected", session->user->username, session->user->discriminator);
-        } break;
-
-        case DISCORD_EVENT_MESSAGE_RECEIVED: {
-            discord_message_t *msg = (discord_message_t *)data->ptr;
-
-            if (!msg || !msg->author || !msg->content || !msg->channel_id) {
-                ESP_LOGW(TAG, "Received an incomplete message");
-                break;
-            }
-
-            ESP_LOGI(TAG,
-                "New message (dm=%s, autor=%s#%s, bot=%s, channel=%s, guild=%s, content=%s)",
-                !msg->guild_id ? "true" : "false",
-                msg->author->username ? msg->author->username : "unknown",
-                msg->author->discriminator ? msg->author->discriminator : "unknown",
-                msg->author->bot ? "true" : "false",
-                msg->channel_id,
-                msg->guild_id ? msg->guild_id : "NULL",
-                msg->content);
-
-            if (msg->author->bot) {
-                break;
-            }
-
-            char *response = NULL;
-            if (strcmp(msg->content, "!equipo") == 0) {
-                response = "La funcionalidad del comando !equipo aun no esta implementada.";
-            } else if (strcmp(msg->content, "!historial") == 0) {
-                response = "La funcionalidad del comando !historial aun no esta implementada.";
-            }
-
-            if (response) {
-                discord_message_t reply = { .content = response, .channel_id = msg->channel_id };
-                esp_err_t err = discord_message_send(bot, &reply, NULL);
-                if (err != ESP_OK) {
-                    ESP_LOGE(TAG, "Failed to send command response");
-                }
-            }
-        } break;
-
-        case DISCORD_EVENT_DISCONNECTED:
-            ESP_LOGW(TAG, "Bot logged out");
-            break;
+    esp_err_t err = esp_netif_sntp_init(&config);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "No se pudo iniciar SNTP: %s", esp_err_to_name(err));
+    } else {
+        ESP_LOGI(TAG, "SNTP iniciado (%s)", CONFIG_LAB_SNTP_SERVER);
     }
 }
 
@@ -76,15 +40,22 @@ void app_main(void)
     ESP_ERROR_CHECK(nvs_flash_init());
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
+
+    ESP_ERROR_CHECK(lab_store_init());
+
+#if CONFIG_ESP_COEX_SW_COEXIST_ENABLE && CONFIG_SOC_IEEE802154_SUPPORTED
+    ESP_ERROR_CHECK(esp_coex_wifi_i154_enable());
+#endif
+
+    ESP_LOGI(TAG, "Conectando Wi-Fi...");
     ESP_ERROR_CHECK(example_connect());
+    ESP_LOGI(TAG, "Wi-Fi conectado");
 
-    discord_config_t cfg = { .intents = DISCORD_INTENT_GUILD_MESSAGES | DISCORD_INTENT_MESSAGE_CONTENT };
+    time_sync_start();
 
-    bot = discord_create(&cfg);
-    ESP_ERROR_CHECK(discord_register_events(bot, DISCORD_EVENT_CONNECTED, bot_event_handler, NULL));
-    ESP_ERROR_CHECK(discord_register_events(bot, DISCORD_EVENT_MESSAGE_RECEIVED, bot_event_handler, NULL));
-    ESP_ERROR_CHECK(discord_register_events(bot, DISCORD_EVENT_DISCONNECTED, bot_event_handler, NULL));
-    ESP_ERROR_CHECK(discord_login(bot));
+    ESP_ERROR_CHECK(thingspeak_init());
+    ESP_ERROR_CHECK(discord_bot_start());
+    ESP_ERROR_CHECK(zigbee_gateway_start());
+
+    ESP_LOGI(TAG, "Gateway listo. Comandos: !equipo, !equipo <nombre>, !historial [N]");
 }
-
-//jeje

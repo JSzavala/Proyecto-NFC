@@ -13,6 +13,26 @@ dependencies:
       registry_url: https://components.espressif.com/
       type: service
     version: 2.0.1
+  espressif/esp-zboss-lib:
+    component_hash: 321883d142421f65009972408287441794250057668a11abbdfd8bec77c3309a
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.6.4
+  espressif/esp-zigbee-lib:
+    component_hash: fa0812e6743e2a7d999af9f44ccdcea17ccb1e80f98d6b2956f44687503a88fd
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.6.8
   espressif/esp_websocket_client:
     component_hash: dc00233af846f3a744ada283a300e0d586040aadc3ee67361645ecdce4523672
     dependencies:
@@ -35,7 +55,9 @@ dependencies:
     version: '*'
 direct_dependencies:
 - abobija/esp-discord
+- espressif/esp-zboss-lib
+- espressif/esp-zigbee-lib
 - protocol_examples_common
-manifest_hash: ac57f75add383f4ec23463fd78eb258d825d187f05c5eb9b4c83ebd6d20cc41e
-target: esp32
+manifest_hash: b873ac2df1d4012e0025191f4f9e1cb4b049718d5aed6d865d3f18e8206ced94
+target: esp32c6
 version: 2.0.0

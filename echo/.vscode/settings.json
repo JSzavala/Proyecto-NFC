@@ -1,4 +1,15 @@
 {
-    "idf.currentSetup": "/home/samuel/.espressif/v6.1-beta1/esp-idf",
-    "idf.port": "/dev/ttyUSB0"
+    "idf.currentSetup": "/home/samuel/.espressif/v5.5.6/esp-idf",
+    "idf.port": "/dev/ttyACM0",
+    "idf.openOcdConfigs": [
+        "board/esp32c6-builtin.cfg"
+    ],
+    "idf.customExtraVars": {},
+    "clangd.path": "/home/samuel/.espressif/tools/esp-clangd/esp-21.1.3_20260408/esp-clangd/bin/clangd",
+    "clangd.arguments": [
+      "--background-index",
+      "--query-driver=**",
+      "--compile-commands-dir=/home/samuel/Documentos/Universidad/IoT/proyecto final/echo/build"
+    ],
+    "idf.flashType": "UART"
 }
