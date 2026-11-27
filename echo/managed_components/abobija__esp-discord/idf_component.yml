@@ -1,0 +1,20 @@
+dependencies:
+  espressif/esp_websocket_client: ^1.2.3
+  idf: ^5.3
+description: Library for hosting Discord Bots
+files:
+  exclude:
+  - docs/**/*
+  - test/**/*
+license: MIT
+maintainers:
+- Alija Bobija <bobija.alija@gmail.com>
+repository: git://github.com/abobija/esp-discord.git
+repository_info:
+  commit_sha: d7ff57a62e02ebc090c6689586cf05e6db8a12df
+  path: .
+tags:
+- discord
+- bot
+url: https://github.com/abobija/esp-discord
+version: 2.0.1

@@ -1,0 +1,58 @@
+menu "Laboratorio IoT (Gateway)"
+
+    choice LAB_ZIGBEE_ROLE
+        prompt "Rol Zigbee del Gateway"
+        default LAB_ZIGBEE_COORDINATOR
+        help
+            El Gateway puede formar la red (coordinador) o unirse a la red
+            que ya tenga el Router Zigbee (end device).
+
+            Si eliges End Device tambien debes seleccionar
+            Component config > Zigbee > Zigbee End Device.
+
+        config LAB_ZIGBEE_COORDINATOR
+            bool "Coordinador (forma la red; el Router se une a este Gateway)"
+        config LAB_ZIGBEE_END_DEVICE
+            bool "End Device (se une a la red del Router)"
+    endchoice
+
+    config LAB_ZIGBEE_CHANNEL
+        int "Canal Zigbee primario (11-26)"
+        range 11 26
+        default 13
+
+    config LAB_ZIGBEE_PAN_ID
+        hex "PAN ID del Gateway (solo coordinador)"
+        default 0x1A62
+
+    config LAB_THINGSPEAK_URL
+        string "URL de actualizacion de ThingSpeak"
+        default "http://api.thingspeak.com/update"
+
+    config LAB_THINGSPEAK_API_KEY
+        string "Write API Key del canal de ThingSpeak"
+        default ""
+
+    config LAB_THINGSPEAK_MIN_INTERVAL_S
+        int "Segundos minimos entre publicaciones a ThingSpeak"
+        range 15 300
+        default 15
+
+    config LAB_DISCORD_NOTIFY_CHANNEL
+        string "ID de canal de Discord para notificaciones (vacio = ultimo canal con actividad)"
+        default ""
+
+    config LAB_HISTORY_MAX
+        int "Eventos que devuelve !historial por defecto"
+        range 1 30
+        default 15
+
+    config LAB_SNTP_SERVER
+        string "Servidor NTP"
+        default "pool.ntp.org"
+
+    config LAB_TIMEZONE
+        string "Zona horaria POSIX"
+        default "CST6"
+
+endmenu
