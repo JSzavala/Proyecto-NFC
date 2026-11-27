@@ -153,3 +153,257 @@ De esta manera, funciona como el dispositivo intermedio encargado de administrar
 **Lenguaje:** C.
 
 **Entorno de desarrollo:** ESP-IDF.
+
+# Anexo técnico detallado del Router Zigbee
+
+Este anexo describe el firmware que se encuentra en `zigbee_router/main/`, no el Router encontrado dentro de dependencias generadas o ejemplos. El objetivo del firmware es convertir lecturas NFC aisladas en una sola fuente de verdad sobre el estado del laboratorio.
+
+## 1. Responsabilidad dentro del sistema completo
+
+El sistema se divide en tres funciones:
+
+1. **End Device lector NFC:** utiliza el PN532 y envía el UID leído al Router.
+2. **Router Zigbee:** acepta el UID, identifica el equipo, decide si ocurre entrada, salida o corrección automática y persiste el resultado.
+3. **Gateway:** recibe el resultado consolidado y lo publica o expone a Discord y ThingSpeak.
+
+La cadena completa es:
+
+```text
+Tarjeta NFC
+  -> PN532 del End Device
+  -> UID en bytes por Zigbee
+  -> Endpoint 10 / cluster personalizado 0xFF00 del Router
+  -> Cola de eventos FreeRTOS
+  -> Identificación del equipo y consolidación del estado
+  -> NVS + SPIFFS
+  -> Notificación Zigbee al Gateway
+  -> Discord / ThingSpeak
+```
+
+El Router debe considerarse el dueño del estado lógico del laboratorio. El End Device no decide si el laboratorio está ocupado; solo envía el UID. El Gateway no modifica directamente el estado: recibe eventos y consultas para presentar la información.
+
+## 2. Inicio del firmware
+
+`app_main()` realiza, en este orden, las siguientes operaciones:
+
+1. Inicializa NVS, que también usa el stack Zigbee.
+2. Monta la partición SPIFFS y apunta al archivo `/spiffs/historial.txt`.
+3. Recupera el estado ocupado o libre desde NVS.
+4. Configura la radio nativa y el modo host del ESP32-C6.
+5. Crea una cola FreeRTOS de diez mensajes `evento_nfc_msg_t`.
+6. Crea la tarea de consolidación de eventos.
+7. Crea la tarea principal del stack Zigbee con rol Router.
+
+Al iniciarse, `esp_zb_task()` registra el Endpoint 10, el cluster personalizado `0xFF00` en roles servidor y cliente, y arranca el stack. El callback de señales Zigbee busca o reconstruye la red con *network steering*, marca la red como conectada y abre la red durante 180 segundos para permitir la incorporación de End Devices.
+
+## 3. Entrada a la red Zigbee
+
+El dispositivo se configura con:
+
+- Rol: `ESP_ZB_DEVICE_TYPE_ROUTER`.
+- Endpoint propio: 10.
+- Perfil: perfil HA (`0x0104`).
+- Cluster personalizado: `0xFF00`.
+- Dirección corta Gateway esperada: `0x0000`.
+- Red disponible en todos los canales definidos por la máscara primaria del firmware.
+
+Un Router no reemplaza al Coordinador/Gateway. Debe existir una red formada por el Coordinador, y el Router debe incorporarse mediante *network steering*. Una vez unido, puede reenviar mensajes y permitir que un End Device se una a través de él.
+
+La política actual de instalación (`INSTALLCODE_POLICY_ENABLE`) está desactivada. Por ello, las placas prueban la unión por los mecanismos normales de la red configurada. La persistencia de credenciales en NVS permite que un dispositivo previamente unido vuelva a incorporarse sin ejecutar nuevamente el primer emparejamiento.
+
+## 4. Recepción del UID NFC
+
+Cuando el End Device lee una tarjeta, envía el UID al Endpoint 10 del Router con el comando personalizado:
+
+| Elemento | Valor |
+|---|---|
+| Cluster | `0xFF00` |
+| Comando | `CMD_NFC_UID_EVENT = 0x01` |
+| Dirección origen | Dirección corta del End Device |
+| Payload | UID en bytes |
+
+El callback `manejar_comando_custom_zigbee()` obtiene la dirección corta origen, el ID del comando y el contenido recibido. Convierte el UID recibido, de hasta diez bytes, a una estructura `evento_nfc_msg_t` y la coloca en la cola FreeRTOS. Esta separación permite que el procesamiento HTTP/almacenamiento no bloquee el manejo rápido del stack Zigbee.
+
+La tarea `procesar_eventos_task()` consume la cola y llama a `consolidar_evento_nfc()`.
+
+La conversión de bytes a texto usa mayúsculas sin separadores. Por ejemplo:
+
+```text
+[0x04, 0xA1, 0xB2, 0xC3] -> 04A1B2C3
+```
+
+`obtener_nombre_equipo()` busca ese texto en `tabla_equipos`. Si no existe, el equipo se identifica como `Equipo-<UID>`. Los UIDs reales deben agregarse a la tabla antes de que se conozca un nombre fijo.
+
+## 5. Consolidación de entradas y salidas
+
+El estado actual se mantiene en memoria y se sincroniza con NVS:
+
+```c
+bool ocupado;
+char uid_hex[21];
+char nombre_equipo[32];
+int64_t timestamp_entrada_seg;
+```
+
+`timestamp_entrada_seg` usa la base de tiempo del ESP-IDF mediante `esp_timer_get_time()`. Actualmente representa tiempo de ejecución del sistema en microsegundos convertido a segundos; el cálculo de duración se obtiene restando tiempos, no requiere una hora wall-clock.
+
+### Entrada
+
+Si el laboratorio está libre:
+
+1. Se marca `ocupado = true`.
+2. Se guarda el UID y el nombre del equipo.
+3. Se registra el instante de entrada.
+4. Se guarda el estado completo en NVS.
+5. Se agrega una línea de entrada a `/spiffs/historial.txt`.
+6. Se envía la notificación al Gateway.
+
+### Salida normal
+
+Si el UID recibido coincide con el UID almacenado:
+
+1. Se calcula la duración en minutos.
+2. Se agrega la salida al historial.
+3. Se limpia el estado actual.
+4. Se persiste el estado libre en NVS.
+5. Se envía una notificación de salida al Gateway.
+
+### Corrección automática
+
+Si el laboratorio está ocupado por un equipo y pasa un UID distinto:
+
+1. Se trata como salida automática del equipo anterior.
+2. Se registra `AUTO-SALIDA` en SPIFFS.
+3. Se notifica al Gateway el olvido de check-out.
+4. Se reemplaza el estado por el nuevo equipo.
+5. Se registra la entrada del nuevo equipo y se vuelve a notificar.
+
+Esto evita dejar el laboratorio ocupado indefinidamente cuando un equipo inicia la sesión de otro sin completar primero la salida.
+
+## 6. Persistencia y reinicios
+
+### NVS
+
+NVS conserva el estado consolidado dentro del namespace `lab_cisco`, clave `estado_actual`. Contiene únicamente el estado lógico del laboratorio; no contiene todo el historial.
+
+Ventajas:
+
+- Recupera el equipo ocupado después de reiniciar la placa.
+- Evita que el laboratorio aparezca libre si ya existía una sesión activa.
+- Garantiza que el estado y el historial sean coherentes después de un reinicio cuando SPIFFS está disponible.
+
+### SPIFFS
+
+SPIFFS monta la partición `spiffs` en `/spiffs`. El archivo generado es:
+
+```text
+/spiffs/historial.txt
+```
+
+Cada línea contiene una marca aproximada basada en el tiempo de ejecución, el tipo de evento, el equipo, el UID y, en salida normal, la duración. La consulta de historial devuelve los últimos datos que caben en el payload Zigbee reservado por el firmware.
+
+## 7. Comunicación con el Gateway
+
+La ruta implementada por el código del Router usa:
+
+- Dirección Gateway: `0x0000` por defecto.
+- Endpoint destino: 10.
+- Cluster: `0xFF00`.
+- Dirección corta: se actualiza con el origen de las consultas recibidas.
+- Perfil: HA `0x0104`.
+
+Los comandos definidos en `zigbee_router.h` son:
+
+| Comando | Valor | Flujo |
+|---|---:|---|
+| `CMD_NFC_UID_EVENT` | `0x01` | End Device -> Router |
+| `CMD_NOTIFY_GATEWAY` | `0x02` | Router -> Gateway |
+| `CMD_QUERY_EQUIPO` | `0x03` | Gateway -> Router |
+| `CMD_RESP_EQUIPO` | `0x04` | Router -> Gateway |
+| `CMD_QUERY_HISTORIAL` | `0x05` | Gateway -> Router |
+| `CMD_RESP_HISTORIAL` | `0x06` | Router -> Gateway |
+
+Las notificaciones actuales usan una cadena con el formato:
+
+```text
+Equipo|CódigoEvento|Mensaje
+```
+
+Los códigos son:
+
+- `1`: entrada.
+- `2`: salida normal.
+- `3`: salida automática/corrección.
+
+El Gateway puede solicitar el estado con `!equipo`; el Router responde `CMD_RESP_EQUIPO`. El Gateway puede solicitar el historial con `!historial`; el Router responde `CMD_RESP_HISTORIAL` leyendo SPIFFS.
+
+## 8. Integración que debe verificarse antes de desplegar
+
+Existe una diferencia de protocolo entre dos implementaciones presentes en el repositorio:
+
+- `zigbee_router/` actualmente comunica eventos mediante el cluster `0xFF00` y comandos `0x01`–`0x06`.
+- `echo/main/` contiene un protocolo nuevo mediante el cluster `0xFC00`, endpoint 10 y comandos `0x00` para evento, `0x01` ping y `0x02` ACK.
+
+Para que las placas se comuniquen, Gateway, Router y End Device deben usar exactamente el mismo perfil, canal, PAN/red Zigbee, endpoint y cluster. Antes de conectar el `echo/` Gateway definitivo con este Router, hay que elegir una única capa de integración:
+
+- **Opción compatible con el Router actual:** adaptar el Gateway al cluster `0xFF00` y al comando `CMD_NOTIFY_GATEWAY`.
+- **Opción más nueva:** ampliar el Router para enviar el `lab_event_t` de 64 bytes al cluster `0xFC00`, comando `0x00`, y retirar o reemplazar el protocolo anterior.
+
+No es suficiente tener ambos nombres de proyecto abiertos en ESP-IDF: solo el firmware compilado y grabado en cada placa determina el protocolo activo.
+
+## 9. Relación con los demás componentes del repositorio
+
+| Carpeta o archivo | Papel |
+|---|---|
+| `zigbee_router/main/zigbee_router.c` | Lógica principal del Router, FreeRTOS, NVS, SPIFFS y ZCL |
+| `zigbee_router/main/zigbee_router.h` | Configuración del Router y comandos del protocolo heredado |
+| `main/main.c` | Implementación del End Device lector PN532 que descubre el Router |
+| `echo/main/zigbee_gateway.c` | Gateway y coordinador alternativo/integradable con Discord y ThingSpeak |
+| `echo/main/lab_protocol.h` | Formato estructurado nuevo de evento para el cluster `0xFC00` |
+| `echo/main/lab_store.h` / `lab_store.c` | Almacenamiento usado por la implementación del Gateway |
+| `echo/main/discord_bot.h` / `discord_bot.c` | Presentación de eventos y respuestas a comandos Discord |
+| `echo/main/thingspeak.h` / `thingspeak.c` | Publicación de eventos al canal ThingSpeak |
+
+## 10. Compilación del Router
+
+Desde la carpeta `zigbee_router`:
+
+```bash
+idf.py set-target esp32c6
+idf.py build
+idf.py -p COMx flash monitor
+```
+
+Reemplazar `COMx` por el puerto asignado al ESP32-C6. En Visual Studio Code, el proyecto puede compilarse con las tareas y configuraciones del SDK de ESP-IDF.
+
+Antes de grabar:
+
+1. Confirmar la partición `spiffs` en `partitions.csv`.
+2. Confirmar que el Gateway esté formado y listo antes de abrir la unión del Router.
+3. Confirmar el canal y el protocolo Zigbee compartido.
+4. Configurar los UIDs reales en `tabla_equipos`.
+5. Usar el monitor serie para revisar el rol, PAN ID, canal y dirección corta asignada.
+
+## 11. Flujo de prueba recomendado
+
+1. Grabar y encender el Gateway/Coordinador.
+2. Confirmar que el Gateway abra la formación o haya creado la red.
+3. Grabar y encender el Router.
+4. Verificar por el monitor serie que se convirtió en `ROUTER` y obtuvo una dirección corta.
+5. Abrir la red al End Device durante el periodo configurado.
+6. Grabar el End Device y confirmar que descubre el Router.
+7. Leer una tarjeta registrada: debe aparecer entrada y persistirse.
+8. Reiniciar el Router: debe recuperar el estado ocupado.
+9. Leer la misma tarjeta: debe aparecer salida y calcular estancia.
+10. Leer otro equipo con una sesión activa: debe aparecer salida automática del anterior y entrada del nuevo.
+11. Ejecutar consultas desde el Gateway y verificar tanto estado como historial.
+
+## 12. Diagnóstico rápido
+
+- **El Router no se une:** comprobar que el Coordinador esté activo, que la red permita miembros y que el canal coincida.
+- **El End Device no encuentra el Router:** confirmar Endpoint 10 y cluster compatible en ambos extremos.
+- **Se pierde el estado al reiniciar:** revisar NVS y cualquier borrado de flash en el proceso de flasheo.
+- **No aparece el historial:** revisar que la partición `spiffs` esté grabada y que `/spiffs/historial.txt` pueda abrirse.
+- **El Gateway no recibe eventos:** confirmar que el cluster y el comando coincidan; verificar también que el Router tenga red Zigbee activa.
+- **No reconoce el equipo:** agregar el UID hexadecimal real a `tabla_equipos`.
+- **El equipo no cambia de libre a ocupado:** revisar el tamaño y contenido del UID recibido por Zigbee.
